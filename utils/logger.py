@@ -8,6 +8,29 @@ import os
 import sys
 from datetime import datetime
 
+# Try to import formatter for size formatting (will handle failure gracefully)
+try:
+    from Plugins.Extensions.WGFileManagerPro.utils.formatters import format_size
+except ImportError:
+    # Fallback format_size function
+    def format_size(bytes_size):
+        """Format bytes to human-readable size (fallback)"""
+        if bytes_size is None:
+            return "N/A"
+        try:
+            bytes_size = float(bytes_size)
+        except (ValueError, TypeError):
+            return "N/A"
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes_size < 1024.0:
+                if unit == 'B':
+                    return "%d %s" % (int(bytes_size), unit)
+                else:
+                    return "%.1f %s" % (bytes_size, unit)
+            bytes_size /= 1024.0
+        return "%.1f %s" % (bytes_size, 'TB')
+
+
 # Create main logger
 logger = logging.getLogger('wgfilemanager')
 logger.setLevel(logging.INFO)
@@ -16,7 +39,7 @@ logger.setLevel(logging.INFO)
 LOG_DIR = "/tmp/wgfilemanager"
 if not os.path.exists(LOG_DIR):
     try:
-        os.makedirs(LOG_DIR)
+        os.makedirs(LOG_DIR, mode=0o755)
     except:
         LOG_DIR = "/tmp"
 
@@ -282,20 +305,8 @@ def get_log_stats():
                     'exists': True
                 }
             except:
-                stats[name] = {'exists': False}
+                stats[name] = {'exists': False, 'path': filepath, 'size': 0, 'size_human': '0 B'}
         else:
-            stats[name] = {'exists': False}
+            stats[name] = {'exists': False, 'path': filepath, 'size': 0, 'size_human': '0 B'}
     
     return stats
-
-
-def format_size(bytes_size):
-    """Format bytes to human-readable size"""
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if bytes_size < 1024.0:
-            if unit == 'B':
-                return "%d %s" % (int(bytes_size), unit)
-            else:
-                return "%.1f %s" % (bytes_size, unit)
-        bytes_size /= 1024.0
-    return "%.1f %s" % (bytes_size, 'TB')

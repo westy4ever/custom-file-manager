@@ -6,8 +6,12 @@ from __future__ import absolute_import, division, print_function
 import os
 import time
 import stat
+import re
 from datetime import datetime
-from Plugins.Extensions.WGFileManagerPro.core.compatibility import ensure_unicode, NavigationHelper
+from Plugins.Extensions.WGFileManagerPro.core.compatibility import ensure_unicode
+
+# NavigationHelper is imported but not used in this file - kept for compatibility
+from Plugins.Extensions.WGFileManagerPro.core.compatibility import NavigationHelper
 
 
 def format_size(bytes_size):
@@ -118,6 +122,12 @@ def format_permissions(mode):
     Returns:
         str: Permission string (e.g., "rwxr-xr--")
     """
+    if not isinstance(mode, int):
+        try:
+            mode = int(mode)
+        except:
+            return "----------"
+    
     perm_str = ''
     
     # File type
@@ -219,75 +229,123 @@ def format_permissions_with_octal(path):
         return perm_str
 
 
-def get_file_icon(filename, is_dir=False):
+def get_file_icon(filename, is_dir=False, icon_set='modern'):
     """
     Get icon for file based on extension
     
     Args:
         filename: File name
         is_dir: Whether it's a directory
+        icon_set: Icon set to use ('modern', 'classic', 'minimal', 'colorful')
         
     Returns:
         str: Icon character/emoji
     """
     if is_dir:
-        return u'📁'
+        if icon_set == 'classic':
+            return '[DIR]'
+        elif icon_set == 'minimal':
+            return 'D'
+        elif icon_set == 'colorful':
+            return '📁'
+        else:  # modern
+            return u'📁'
     
     # Get extension
     _, ext = os.path.splitext(filename)
     ext = ext.lower()
     
-    # Icon mapping
-    icons = {
-        # Video
-        '.mkv': u'🎬', '.mp4': u'🎬', '.avi': u'🎬', '.mov': u'🎬',
-        '.wmv': u'🎬', '.flv': u'🎬', '.m4v': u'🎬', '.mpg': u'🎬',
-        '.mpeg': u'🎬', '.webm': u'🎬', '.ts': u'🎬', '.m2ts': u'🎬',
-        
-        # Audio
-        '.mp3': u'🎵', '.flac': u'🎵', '.m4a': u'🎵', '.aac': u'🎵',
-        '.ogg': u'🎵', '.wav': u'🎵', '.wma': u'🎵', '.opus': u'🎵',
-        
-        # Images
-        '.jpg': u'🖼️', '.jpeg': u'🖼️', '.png': u'🖼️', '.gif': u'🖼️',
-        '.bmp': u'🖼️', '.svg': u'🖼️', '.webp': u'🖼️', '.ico': u'🖼️',
-        '.tiff': u'🖼️', '.tif': u'🖼️', '.mvi': u'🖼️',
-        
-        # Archives
-        '.zip': u'📦', '.rar': u'📦', '.7z': u'📦', '.tar': u'📦',
-        '.gz': u'📦', '.bz2': u'📦', '.xz': u'📦', '.zst': u'📦',
-        '.tar.gz': u'📦', '.tgz': u'📦', '.tar.bz2': u'📦',
-        
-        # Documents
-        '.pdf': u'📕', '.doc': u'📘', '.docx': u'📘', '.odt': u'📘',
-        '.txt': u'📄', '.rtf': u'📄', '.log': u'📄',
-        
-        # Spreadsheets
-        '.xls': u'📊', '.xlsx': u'📊', '.ods': u'📊', '.csv': u'📊',
-        
-        # Code
-        '.py': u'🐍', '.sh': u'⚙️', '.c': u'©️', '.cpp': u'🔧',
-        '.h': u'🔧', '.js': u'📜', '.html': u'🌐', '.css': u'🎨',
-        '.xml': u'📋', '.json': u'📋', '.yaml': u'📋', '.yml': u'📋',
-        
-        # System
-        '.deb': u'📦', '.ipk': u'📦', '.rpm': u'📦',
-        '.iso': u'💿', '.img': u'💿',
-        
-        # Playlists
-        '.m3u': u'📻', '.m3u8': u'📻', '.pls': u'📻',
-        
-        # Executables
-        '.bin': u'⚙️', '.run': u'⚙️', '.sh': u'⚙️', '.bash': u'⚙️',
-        
-        # Subtitles
-        '.srt': u'📝', '.sub': u'📝', '.ass': u'📝',
-        
-        # E-books
-        '.epub': u'📚', '.mobi': u'📚',
-    }
+    # Icon mapping by icon set
+    if icon_set == 'classic':
+        icons = {
+            # Video
+            '.mkv': '[VID]', '.mp4': '[VID]', '.avi': '[VID]', '.mov': '[VID]',
+            # Audio
+            '.mp3': '[AUD]', '.flac': '[AUD]', '.m4a': '[AUD]', '.wav': '[AUD]',
+            # Images
+            '.jpg': '[IMG]', '.jpeg': '[IMG]', '.png': '[IMG]', '.gif': '[IMG]',
+            # Archives
+            '.zip': '[ARC]', '.rar': '[ARC]', '.7z': '[ARC]',
+            # Documents
+            '.pdf': '[PDF]', '.txt': '[TXT]', '.doc': '[DOC]',
+            # Code
+            '.py': '[PY]', '.sh': '[SH]',
+        }
+        return icons.get(ext, '[FILE]')
     
-    return icons.get(ext, u'📄')
+    elif icon_set == 'minimal':
+        icons = {
+            '.mkv': 'V', '.mp4': 'V', '.avi': 'V', 
+            '.mp3': 'A', '.flac': 'A', '.wav': 'A',
+            '.jpg': 'I', '.png': 'I', '.gif': 'I',
+            '.zip': 'Z', '.rar': 'Z', '.7z': 'Z',
+            '.pdf': 'P', '.txt': 'T',
+            '.py': 'P', '.sh': 'S',
+        }
+        return icons.get(ext, 'F')
+    
+    elif icon_set == 'colorful':
+        icons = {
+            '.mkv': '🎬', '.mp4': '🎬', '.avi': '🎬', '.mov': '🎬',
+            '.mp3': '🎵', '.flac': '🎵', '.wav': '🎵',
+            '.jpg': '🖼️', '.png': '🖼️', '.gif': '🖼️',
+            '.zip': '📦', '.rar': '📦', '.7z': '📦',
+            '.pdf': '📕', '.txt': '📄',
+            '.py': '🐍', '.sh': '⚙️',
+        }
+        return icons.get(ext, '📄')
+    
+    else:  # modern
+        icons = {
+            # Video
+            '.mkv': u'🎬', '.mp4': u'🎬', '.avi': u'🎬', '.mov': u'🎬',
+            '.wmv': u'🎬', '.flv': u'🎬', '.m4v': u'🎬', '.mpg': u'🎬',
+            '.mpeg': u'🎬', '.webm': u'🎬', '.ts': u'🎬', '.m2ts': u'🎬',
+            
+            # Audio
+            '.mp3': u'🎵', '.flac': u'🎵', '.m4a': u'🎵', '.aac': u'🎵',
+            '.ogg': u'🎵', '.wav': u'🎵', '.wma': u'🎵', '.opus': u'🎵',
+            
+            # Images
+            '.jpg': u'🖼️', '.jpeg': u'🖼️', '.png': u'🖼️', '.gif': u'🖼️',
+            '.bmp': u'🖼️', '.svg': u'🖼️', '.webp': u'🖼️', '.ico': u'🖼️',
+            '.tiff': u'🖼️', '.tif': u'🖼️', '.mvi': u'🖼️',
+            
+            # Archives
+            '.zip': u'📦', '.rar': u'📦', '.7z': u'📦', '.tar': u'📦',
+            '.gz': u'📦', '.bz2': u'📦', '.xz': u'📦', '.zst': u'📦',
+            '.tar.gz': u'📦', '.tgz': u'📦', '.tar.bz2': u'📦',
+            
+            # Documents
+            '.pdf': u'📕', '.doc': u'📘', '.docx': u'📘', '.odt': u'📘',
+            '.txt': u'📄', '.rtf': u'📄', '.log': u'📄',
+            
+            # Spreadsheets
+            '.xls': u'📊', '.xlsx': u'📊', '.ods': u'📊', '.csv': u'📊',
+            
+            # Code
+            '.py': u'🐍', '.sh': u'⚙️', '.c': u'©️', '.cpp': u'🔧',
+            '.h': u'🔧', '.js': u'📜', '.html': u'🌐', '.css': u'🎨',
+            '.xml': u'📋', '.json': u'📋', '.yaml': u'📋', '.yml': u'📋',
+            
+            # System
+            '.deb': u'📦', '.ipk': u'📦', '.rpm': u'📦',
+            '.iso': u'💿', '.img': u'💿',
+            
+            # Playlists
+            '.m3u': u'📻', '.m3u8': u'📻', '.pls': u'📻',
+            
+            # Executables
+            '.bin': u'⚙️', '.run': u'⚙️', '.bash': u'⚙️',
+            
+            # Subtitles
+            '.srt': u'📝', '.sub': u'📝', '.ass': u'📝',
+            
+            # E-books
+            '.epub': u'📚', '.mobi': u'📚',
+        }
+        
+        return icons.get(ext, u'📄')
 
 
 def get_file_type_name(filename, is_dir=False):
@@ -308,17 +366,18 @@ def get_file_type_name(filename, is_dir=False):
     ext = ext.lower()
     
     types = {
-        '.mkv': 'Video File', '.mp4': 'Video File', '.avi': 'Video File',
-        '.mp3': 'Audio File', '.flac': 'Audio File',
-        '.jpg': 'Image File', '.png': 'Image File', '.gif': 'Image File',
-        '.zip': 'Archive', '.rar': 'Archive', '.7z': 'Archive',
-        '.pdf': 'PDF Document', '.doc': 'Word Document', '.docx': 'Word Document',
-        '.txt': 'Text File', '.log': 'Log File',
-        '.py': 'Python Script', '.sh': 'Shell Script',
-        '.deb': 'Debian Package', '.ipk': 'IPK Package',
-        '.bin': 'Binary Executable', '.run': 'Executable',
+        '.mkv': 'Video File', '.mp4': 'Video File', '.avi': 'Video File', '.mov': 'Video File',
+        '.mp3': 'Audio File', '.flac': 'Audio File', '.m4a': 'Audio File', '.wav': 'Audio File',
+        '.jpg': 'Image File', '.jpeg': 'Image File', '.png': 'Image File', '.gif': 'Image File',
+        '.zip': 'Archive', '.rar': 'Archive', '.7z': 'Archive', '.tar': 'Archive',
+        '.pdf': 'PDF Document', '.txt': 'Text File', '.doc': 'Word Document', '.docx': 'Word Document',
+        '.xls': 'Excel Spreadsheet', '.xlsx': 'Excel Spreadsheet', '.csv': 'CSV File',
+        '.py': 'Python Script', '.sh': 'Shell Script', '.c': 'C Source', '.cpp': 'C++ Source',
+        '.deb': 'Debian Package', '.ipk': 'IPK Package', '.rpm': 'RPM Package',
+        '.iso': 'Disk Image', '.img': 'Disk Image',
         '.srt': 'Subtitle File', '.m3u': 'Playlist File',
-        '.epub': 'E-book', '.iso': 'Disk Image',
+        '.epub': 'E-book', '.mobi': 'E-book',
+        '.log': 'Log File', '.conf': 'Configuration File', '.ini': 'Configuration File',
     }
     
     return types.get(ext, 'File')
@@ -379,7 +438,7 @@ def is_media_file(filename):
     media_exts = {
         '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.m4v',
         '.mpg', '.mpeg', '.webm', '.ts', '.m2ts',
-        '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.wav', '.wma'
+        '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.wav', '.wma', '.opus'
     }
     
     return ext in media_exts
@@ -467,7 +526,6 @@ def sanitize_filename(filename):
     Returns:
         str: Sanitized filename
     """
-    import re
     # Remove invalid characters
     filename = re.sub(r'[<>:"/\\|?*]', '_', ensure_unicode(filename))
     # Remove leading/trailing spaces and dots
@@ -527,9 +585,8 @@ def human_sort_key(text):
     Returns:
         list: Sort key
     """
-    import re
     def atoi(text):
-        return int(text) if text.isdigit() else text
+        return int(text) if text.isdigit() else text.lower()
     
     return [atoi(c) for c in re.split(r'(\d+)', ensure_unicode(text))]
 
