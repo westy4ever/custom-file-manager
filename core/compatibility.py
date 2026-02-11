@@ -1,561 +1,353 @@
 """
-Python 2.7 and 3.x compatibility layer
-Ensures code works seamlessly across both versions
+Progress dialog with dual progress bars and operation controls
+Shows real-time progress for file operations
 """
 
-from __future__ import absolute_import, division, print_function
-import sys
-import os
-import re
+from __future__ import absolute_import, print_function
+import threading
 
-# Version detection
-PY2 = sys.version_info[0] == 2
-PY3 = sys.version_info[0] == 3
+try:
+    from Screens.Screen import Screen
+    from Components.Label import Label
+    from Components.ProgressBar import ProgressBar
+    from Components.ActionMap import ActionMap
+    from enigma import eTimer
+    ENIGMA2_AVAILABLE = True
+except ImportError:
+    ENIGMA2_AVAILABLE = False
+    Screen = object
 
-# String types
-if PY3:
-    string_types = str
-    text_type = str
-    binary_type = bytes
-    from io import StringIO, BytesIO
-    import queue as Queue
-    from urllib.parse import quote, unquote, urlparse
-    import configparser as ConfigParser
+from Plugins.Extensions.WGFileManagerPro.utils.formatters import format_size, format_speed, format_time
+from Plugins.Extensions.WGFileManagerPro.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+if ENIGMA2_AVAILABLE:
+    
+    class OperationProgressDialog(Screen):
+        """Progress dialog for file operations"""
+        
+        # Skin definition
+        skin = """
+            <screen position="center,center" size="800,450" title="Operation in Progress">
+                <widget name="title" position="20,20" size="760,40" font="Regular;28" />
+                
+                <!-- Current file progress -->
+                <widget name="current_label" position="20,80" size="760,30" font="Regular;22" />
+                <widget name="current_file" position="20,115" size="760,25" font="Regular;20" />
+                <widget name="current_progress" position="20,145" size="760,30" />
+                <widget name="current_stats" position="20,180" size="760,22" font="Regular;18" />
+                
+                <!-- Overall progress -->
+                <widget name="overall_label" position="20,220" size="760,30" font="Regular;22" />
+                <widget name="overall_progress" position="20,255" size="760,30" />
+                <widget name="overall_stats" position="20,290" size="760,22" font="Regular;18" />
+                
+                <!-- Status log -->
+                <widget name="log" position="20,330" size="760,60" font="Regular;16" />
+                
+                <!-- Controls -->
+                <widget name="buttons" position="20,400" size="760,30" font="Regular;20" halign="center" />
+            </screen>
+        """
+        
+        def __init__(self, session, operation_name="File Operation", file_operation=None):
+            """
+            Initialize progress dialog
+            
+            Args:
+                session: Enigma2 session
+                operation_name: Name of operation
+                file_operation: FileOperations instance
+            """
+            Screen.__init__(self, session)
+            self.session = session
+            
+            self.operation_name = operation_name
+            self.file_operation = file_operation
+            self.paused = False
+            self.cancelled = False
+            
+            # Timer connection reference for cleanup
+            self._timer_conn = None
+            
+            # UI components
+            self["title"] = Label(operation_name)
+            self["current_label"] = Label("Current File:")
+            self["current_file"] = Label("Initializing...")
+            self["current_progress"] = ProgressBar()
+            self["current_stats"] = Label("")
+            self["overall_label"] = Label("Overall Progress:")
+            self["overall_progress"] = ProgressBar()
+            self["overall_stats"] = Label("")
+            self["log"] = Label("")
+            self["buttons"] = Label("[PAUSE]  [SKIP]  [CANCEL]")
+            
+            # Setup actions
+            self["actions"] = ActionMap(
+                ["WGFileManagerActions", "ColorActions"],
+                {
+                    "yellow": self.toggle_pause,
+                    "blue": self.skip_file,
+                    "red": self.cancel_operation,
+                    "ok": self.toggle_pause,
+                    "cancel": self.handle_exit,
+                },
+                -1
+            )
+            
+            # Update timer
+            self.update_timer = eTimer()
+            
+            # Last progress data
+            self.last_progress = {}
+            
+            logger.info("[Progress] Dialog initialized: %s", operation_name)
+        
+        def start(self):
+            """Start progress tracking"""
+            # Clean up any existing timer connection
+            self.stop()
+            
+            # Add callback
+            self._timer_conn = self.update_display
+            self.update_timer.callback.append(self._timer_conn)
+            self.update_timer.start(100, False)
+            
+            logger.debug("[Progress] Progress tracking started")
+        
+        def stop(self):
+            """Stop progress tracking"""
+            if hasattr(self, 'update_timer') and self.update_timer.isActive():
+                self.update_timer.stop()
+            
+            # Remove callback
+            if hasattr(self, '_timer_conn') and self._timer_conn:
+                if self._timer_conn in self.update_timer.callback:
+                    self.update_timer.callback.remove(self._timer_conn)
+                self._timer_conn = None
+            
+            logger.debug("[Progress] Progress tracking stopped")
+        
+        def update_progress(self, data):
+            """
+            Update progress from operation
+            
+            Args:
+                data: Progress data dictionary
+            """
+            self.last_progress = data
+        
+        def update_display(self):
+            """Update display with latest progress"""
+            if not self.last_progress:
+                return
+            
+            try:
+                data = self.last_progress
+                
+                # Current file
+                if 'file' in data:
+                    self["current_file"].setText(data['file'])
+                
+                if 'percent' in data:
+                    self["current_progress"].setValue(data['percent'])
+                
+                # Current stats
+                stats = []
+                if 'copied' in data and 'total' in data:
+                    stats.append("%s / %s" % (
+                        format_size(data['copied']),
+                        format_size(data['total'])
+                    ))
+                
+                if 'speed' in data:
+                    stats.append("Speed: %s" % format_speed(data['speed']))
+                
+                if 'eta' in data:
+                    stats.append("ETA: %s" % format_time(data['eta']))
+                
+                if stats:
+                    self["current_stats"].setText("  |  ".join(stats))
+                
+                # Overall progress
+                if 'overall_percent' in data:
+                    self["overall_progress"].setValue(data['overall_percent'])
+                
+                # Overall stats
+                overall_stats = []
+                if 'completed' in data and 'files_total' in data:
+                    overall_stats.append("Files: %d / %d" % (
+                        data['completed'],
+                        data['files_total']
+                    ))
+                
+                if 'elapsed' in data:
+                    overall_stats.append("Elapsed: %s" % format_time(data['elapsed']))
+                
+                if 'errors' in data and data['errors'] > 0:
+                    overall_stats.append("Errors: %d" % data['errors'])
+                
+                if overall_stats:
+                    self["overall_stats"].setText("  |  ".join(overall_stats))
+                
+                # Check if operation is complete
+                if data.get('overall_percent', 0) >= 100:
+                    self.operation_complete()
+                    
+            except Exception as e:
+                logger.error("[Progress] Display update error: %s", e)
+        
+        def toggle_pause(self):
+            """Toggle pause state"""
+            if not self.file_operation:
+                return
+            
+            self.paused = not self.paused
+            
+            if self.paused:
+                self.file_operation.pause()
+                self["buttons"].setText("[RESUME]  [SKIP]  [CANCEL]")
+                self["log"].setText("Operation paused")
+                logger.debug("[Progress] Operation paused")
+            else:
+                self.file_operation.resume()
+                self["buttons"].setText("[PAUSE]  [SKIP]  [CANCEL]")
+                self["log"].setText("Operation resumed")
+                logger.debug("[Progress] Operation resumed")
+        
+        def skip_file(self):
+            """Skip current file"""
+            self["log"].setText("Skip not implemented yet")
+            logger.debug("[Progress] Skip requested")
+        
+        def cancel_operation(self):
+            """Cancel operation"""
+            if not self.file_operation:
+                return
+            
+            self.file_operation.cancel()
+            self.cancelled = True
+            self["log"].setText("Cancelling operation...")
+            self["buttons"].setText("Please wait...")
+            logger.info("[Progress] Operation cancelled by user")
+        
+        def handle_exit(self):
+            """Handle exit button"""
+            if self.paused or self.cancelled:
+                self.close_dialog()
+            else:
+                # Ask to cancel
+                self.cancel_operation()
+        
+        def operation_complete(self):
+            """Handle operation completion"""
+            self.stop()
+            
+            # Show completion message
+            errors = self.last_progress.get('errors', 0)
+            if errors > 0:
+                self["log"].setText("Completed with %d error(s)" % errors)
+            else:
+                self["log"].setText("Operation completed successfully!")
+            
+            self["buttons"].setText("[OK to close]")
+            logger.info("[Progress] Operation completed. Errors: %d", errors)
+            
+            # Auto-close after 2 seconds if no errors
+            if errors == 0:
+                from enigma import eTimer
+                close_timer = eTimer()
+                close_timer.callback.append(self.close_dialog)
+                close_timer.start(2000, True)  # 2 seconds, single shot
+        
+        def close_dialog(self):
+            """Close the dialog"""
+            self.stop()
+            self.close(self.cancelled)
+        
+        def __del__(self):
+            """Cleanup"""
+            self.stop()
+
+
 else:
-    string_types = basestring
-    text_type = unicode
-    binary_type = str
-    from StringIO import StringIO
-    from io import BytesIO
-    import Queue
-    from urllib import quote, unquote
-    from urlparse import urlparse
-    import ConfigParser
+    # Non-Enigma2 progress dialog (simple console version)
+    
+    class OperationProgressDialog:
+        """Simple progress dialog for testing"""
+        
+        def __init__(self, session=None, operation_name="Operation", file_operation=None):
+            """
+            Initialize progress dialog for testing
+            
+            Args:
+                session: Enigma2 session (ignored in test mode)
+                operation_name: Operation name
+                file_operation: FileOperations instance
+            """
+            self.session = session
+            self.operation_name = operation_name
+            self.file_operation = file_operation
+            self.paused = False
+            self.cancelled = False
+            print("\n=== %s ===" % operation_name)
+        
+        def start(self):
+            """Start tracking"""
+            pass
+        
+        def stop(self):
+            """Stop tracking"""
+            pass
+        
+        def update_progress(self, data):
+            """Update progress"""
+            if 'file' in data:
+                print("File: %s" % data['file'])
+            if 'percent' in data:
+                print("Progress: %d%%" % data['percent'])
+            if 'overall_percent' in data:
+                print("Overall: %d%%" % data['overall_percent'])
+        
+        def toggle_pause(self):
+            """Toggle pause"""
+            self.paused = not self.paused
+            if self.file_operation:
+                if self.paused:
+                    self.file_operation.pause()
+                    print("Operation paused")
+                else:
+                    self.file_operation.resume()
+                    print("Operation resumed")
+        
+        def cancel_operation(self):
+            """Cancel"""
+            if self.file_operation:
+                self.file_operation.cancel()
+            self.cancelled = True
+            print("Operation cancelled")
+        
+        def close_dialog(self):
+            """Close"""
+            print("=== Operation Complete ===\n")
 
-# File handling
-if PY3:
-    import builtins
-    open_file = builtins.open
-else:
-    import __builtin__
-    open_file = __builtin__.open
 
-
-def ensure_str(s):
+# Factory function
+def create_progress_dialog(session, operation_name, file_operation=None):
     """
-    Convert to str (bytes in PY2, unicode in PY3)
+    Create appropriate progress dialog
     
     Args:
-        s: Input string/bytes/unicode
+        session: Enigma2 session (or None)
+        operation_name: Operation name
+        file_operation: FileOperations instance
         
     Returns:
-        str: Native str type for current Python version
+        Progress dialog instance
     """
-    if s is None:
-        return ''
-    
-    if PY2:
-        if isinstance(s, unicode):
-            return s.encode('utf-8')
-        return str(s)
+    if ENIGMA2_AVAILABLE and session:
+        return OperationProgressDialog(session, operation_name, file_operation)
     else:
-        if isinstance(s, bytes):
-            return s.decode('utf-8', errors='replace')
-        return str(s)
-
-
-def ensure_unicode(s):
-    """
-    Convert to unicode string
-    
-    Args:
-        s: Input string/bytes
-        
-    Returns:
-        unicode/str: Unicode string
-    """
-    if s is None:
-        return u''
-    
-    if PY2:
-        if isinstance(s, str):
-            return s.decode('utf-8', errors='replace')
-        return unicode(s)
-    else:
-        if isinstance(s, bytes):
-            return s.decode('utf-8', errors='replace')
-        return str(s)
-
-
-def ensure_bytes(s):
-    """
-    Convert to bytes
-    
-    Args:
-        s: Input string/unicode
-        
-    Returns:
-        bytes: Byte string
-    """
-    if s is None:
-        return b''
-    
-    if PY2:
-        if isinstance(s, unicode):
-            return s.encode('utf-8')
-        return str(s)
-    else:
-        if isinstance(s, str):
-            return s.encode('utf-8')
-        return bytes(s)
-
-
-def safe_listdir(path):
-    """
-    List directory with proper unicode handling
-    
-    Args:
-        path: Directory path
-        
-    Returns:
-        list: List of filenames (unicode)
-    """
-    try:
-        items = os.listdir(ensure_str(path))
-        return [ensure_unicode(item) for item in items]
-    except OSError as e:
-        return []
-
-
-def safe_join(*args):
-    """
-    Join paths with proper encoding
-    
-    Args:
-        *args: Path components
-        
-    Returns:
-        str: Joined path
-    """
-    return os.path.join(*[ensure_str(arg) for arg in args])
-
-
-def get_filesystem_encoding():
-    """Get filesystem encoding"""
-    return sys.getfilesystemencoding() or 'utf-8'
-
-
-def is_valid_path(path):
-    """
-    Check if path is valid and accessible
-    
-    Args:
-        path: Path to check
-        
-    Returns:
-        bool: True if valid and accessible
-    """
-    try:
-        path = ensure_str(path)
-        return os.path.exists(path)
-    except:
-        return False
-
-
-def get_parent_path(path):
-    """
-    Get parent directory path
-    
-    Args:
-        path: File/directory path
-        
-    Returns:
-        str: Parent directory path
-    """
-    try:
-        return os.path.dirname(ensure_str(path))
-    except:
-        return '/'
-
-
-def get_basename(path):
-    """
-    Get basename of path
-    
-    Args:
-        path: File/directory path
-        
-    Returns:
-        str: Basename
-    """
-    try:
-        return os.path.basename(ensure_str(path))
-    except:
-        return ''
-
-
-def normalize_path(path):
-    """
-    Normalize path (remove . and .., convert to absolute)
-    
-    Args:
-        path: Path to normalize
-        
-    Returns:
-        str: Normalized path
-    """
-    try:
-        return os.path.normpath(ensure_str(path))
-    except:
-        return path
-
-
-def path_exists(path):
-    """
-    Check if path exists (with error handling)
-    
-    Args:
-        path: Path to check
-        
-    Returns:
-        bool: True if exists
-    """
-    try:
-        return os.path.exists(ensure_str(path))
-    except:
-        return False
-
-
-def is_directory(path):
-    """
-    Check if path is a directory
-    
-    Args:
-        path: Path to check
-        
-    Returns:
-        bool: True if directory
-    """
-    try:
-        return os.path.isdir(ensure_str(path))
-    except:
-        return False
-
-
-def is_file(path):
-    """
-    Check if path is a file
-    
-    Args:
-        path: Path to check
-        
-    Returns:
-        bool: True if file
-    """
-    try:
-        return os.path.isfile(ensure_str(path))
-    except:
-        return False
-
-
-def is_symlink(path):
-    """
-    Check if path is a symbolic link
-    
-    Args:
-        path: Path to check
-        
-    Returns:
-        bool: True if symlink
-    """
-    try:
-        return os.path.islink(ensure_str(path))
-    except:
-        return False
-
-
-def get_file_size(path):
-    """
-    Get file size in bytes
-    
-    Args:
-        path: File path
-        
-    Returns:
-        int: File size in bytes, or 0 if error
-    """
-    try:
-        return os.path.getsize(ensure_str(path))
-    except:
-        return 0
-
-
-def get_file_mtime(path):
-    """
-    Get file modification time
-    
-    Args:
-        path: File path
-        
-    Returns:
-        float: Modification timestamp, or 0 if error
-    """
-    try:
-        return os.path.getmtime(ensure_str(path))
-    except:
-        return 0
-
-
-def create_directory(path):
-    """
-    Create directory (including parent directories)
-    
-    Args:
-        path: Directory path to create
-        
-    Returns:
-        bool: True if successful
-    """
-    try:
-        os.makedirs(ensure_str(path), exist_ok=True)
-        return True
-    except:
-        return False
-
-
-def remove_file(path):
-    """
-    Remove file
-    
-    Args:
-        path: File path to remove
-        
-    Returns:
-        bool: True if successful
-    """
-    try:
-        os.remove(ensure_str(path))
-        return True
-    except:
-        return False
-
-
-def remove_directory(path):
-    """
-    Remove directory
-    
-    Args:
-        path: Directory path to remove
-        
-    Returns:
-        bool: True if successful
-    """
-    try:
-        import shutil
-        shutil.rmtree(ensure_str(path))
-        return True
-    except:
-        return False
-
-
-def copy_file(src, dst):
-    """
-    Copy file
-    
-    Args:
-        src: Source file path
-        dst: Destination file path
-        
-    Returns:
-        bool: True if successful
-    """
-    try:
-        import shutil
-        shutil.copy2(ensure_str(src), ensure_str(dst))
-        return True
-    except:
-        return False
-
-
-def move_file(src, dst):
-    """
-    Move/rename file
-    
-    Args:
-        src: Source file path
-        dst: Destination file path
-        
-    Returns:
-        bool: True if successful
-    """
-    try:
-        import shutil
-        shutil.move(ensure_str(src), ensure_str(dst))
-        return True
-    except:
-        return False
-
-
-def compare_paths(path1, path2):
-    """
-    Compare two paths (normalized)
-    
-    Args:
-        path1: First path
-        path2: Second path
-        
-    Returns:
-        bool: True if paths are the same
-    """
-    try:
-        return normalize_path(path1) == normalize_path(path2)
-    except:
-        return False
-
-
-def get_common_path(paths):
-    """
-    Get common parent directory for multiple paths
-    
-    Args:
-        paths: List of paths
-        
-    Returns:
-        str: Common parent directory
-    """
-    if not paths:
-        return '/'
-    
-    try:
-        common = os.path.commonprefix([ensure_str(p) for p in paths])
-        # Ensure it ends with directory separator
-        if common and not common.endswith(os.sep):
-            common = os.path.dirname(common)
-        return common or '/'
-    except:
-        return '/'
-
-
-# Metaclass compatibility
-def add_metaclass(metaclass):
-    """
-    Class decorator for creating a class with a metaclass.
-    Compatible with both Python 2 and 3.
-    """
-    def wrapper(cls):
-        orig_vars = cls.__dict__.copy()
-        slots = orig_vars.get('__slots__')
-        if slots is not None:
-            if isinstance(slots, str):
-                slots = [slots]
-            for slots_var in slots:
-                orig_vars.pop(slots_var)
-        orig_vars.pop('__dict__', None)
-        orig_vars.pop('__weakref__', None)
-        return metaclass(cls.__name__, cls.__bases__, orig_vars)
-    return wrapper
-
-
-# Navigation helpers
-class NavigationHelper:
-    """Helper class for navigation operations"""
-    
-    @staticmethod
-    def get_navigation_index(current_index, total_items, direction='down', wrap_around=True):
-        """
-        Calculate new navigation index
-        
-        Args:
-            current_index: Current selection index
-            total_items: Total number of items
-            direction: 'up', 'down', 'pageup', 'pagedown'
-            wrap_around: Enable wrap-around navigation
-            
-        Returns:
-            int: New index
-        """
-        if total_items <= 0:
-            return 0
-        
-        if direction == 'up':
-            new_index = current_index - 1
-            if new_index < 0:
-                return total_items - 1 if wrap_around else 0
-            return new_index
-        
-        elif direction == 'down':
-            new_index = current_index + 1
-            if new_index >= total_items:
-                return 0 if wrap_around else total_items - 1
-            return new_index
-        
-        elif direction == 'pageup':
-            new_index = current_index - 10
-            if new_index < 0:
-                return 0 if not wrap_around else total_items - 1
-            return new_index
-        
-        elif direction == 'pagedown':
-            new_index = current_index + 10
-            if new_index >= total_items:
-                return total_items - 1 if not wrap_around else 0
-            return new_index
-        
-        return current_index
-    
-    @staticmethod
-    def find_item_by_name(items, name, start_index=0):
-        """
-        Find item by name (case-insensitive search)
-        
-        Args:
-            items: List of items (each item should have get_name() or be tuple with name at index 2)
-            name: Name to search for
-            start_index: Index to start search from
-            
-        Returns:
-            int: Index of found item, or -1 if not found
-        """
-        if not items or not name:
-            return -1
-        
-        name_lower = ensure_unicode(name).lower()
-        
-        for i in range(len(items)):
-            idx = (start_index + i) % len(items)
-            item = items[idx]
-            
-            # Try different ways to get the name
-            item_name = None
-            if hasattr(item, 'get_name'):
-                item_name = item.get_name()
-            elif isinstance(item, (list, tuple)) and len(item) > 2:
-                item_name = item[2]
-            elif isinstance(item, dict) and 'name' in item:
-                item_name = item['name']
-            
-            if item_name and ensure_unicode(item_name).lower().startswith(name_lower):
-                return idx
-        
-        return -1
-
-
-# Export all compatibility items
-__all__ = [
-    'PY2', 'PY3',
-    'string_types', 'text_type', 'binary_type',
-    'StringIO', 'BytesIO', 'Queue',
-    'quote', 'unquote', 'urlparse',
-    'ConfigParser',
-    'ensure_str', 'ensure_unicode', 'ensure_bytes',
-    'safe_listdir', 'safe_join',
-    'get_filesystem_encoding',
-    'add_metaclass',
-    'NavigationHelper',
-    'is_valid_path', 'get_parent_path', 'get_basename',
-    'normalize_path', 'path_exists', 'is_directory',
-    'is_file', 'is_symlink', 'get_file_size',
-    'get_file_mtime', 'create_directory', 'remove_file',
-    'remove_directory', 'copy_file', 'move_file',
-    'compare_paths', 'get_common_path',
-]
+        return OperationProgressDialog(session, operation_name, file_operation)

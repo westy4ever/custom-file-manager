@@ -14,9 +14,10 @@ import pwd
 import grp
 from Plugins.Extensions.WGFileManagerPro.core.compatibility import ensure_str, ensure_unicode, safe_listdir, safe_join
 
+# Try to import config, but don't fail if not available
 try:
     from Plugins.Extensions.WGFileManagerPro.core.config import get_config
-except:
+except ImportError:
     get_config = None
 
 from Plugins.Extensions.WGFileManagerPro.utils.logger import get_logger
@@ -81,6 +82,7 @@ class FileOperations:
         self.cancel_flag = threading.Event()
         self.pause_flag = threading.Event()
         self.progress = OperationProgress()
+        self.progress_lock = threading.RLock()
         
         # Get buffer size from config
         if get_config:
@@ -138,7 +140,9 @@ class FileOperations:
         """Report progress to callback"""
         if self.progress_callback:
             try:
-                self.progress_callback(self.progress.to_dict())
+                with self.progress_lock:
+                    progress_data = self.progress.to_dict()
+                self.progress_callback(progress_data)
             except Exception as e:
                 logger.error("[FileOps] Progress callback error: %s", e)
     
@@ -169,26 +173,32 @@ class FileOperations:
                     total_size += size
                     file_count += 1
                     logger.debug("[FileOps] File: %s (%s)", os.path.basename(item), format_size(size))
-                except OSError as e:
+                except (OSError, PermissionError) as e:
                     logger.error("[FileOps] Error getting size for %s: %s", item, e)
-                    self.progress.warnings.append(f"Cannot read size: {os.path.basename(item)}")
+                    with self.progress_lock:
+                        self.progress.warnings.append(f"Cannot read size: {os.path.basename(item)}")
             elif os.path.isdir(item):
                 logger.debug("[FileOps] Directory: %s", item)
                 try:
                     for root, dirs, files in os.walk(item):
                         if self.is_cancelled():
                             break
+                        # Filter out directories we can't access
+                        dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK | os.X_OK)]
+                        
                         for f in files:
                             try:
                                 filepath = safe_join(root, f)
-                                size = os.path.getsize(filepath)
-                                total_size += size
-                                file_count += 1
-                            except OSError:
-                                pass
+                                if os.path.exists(filepath) and not os.path.islink(filepath):
+                                    size = os.path.getsize(filepath)
+                                    total_size += size
+                                    file_count += 1
+                            except (OSError, PermissionError) as e:
+                                logger.debug("[FileOps] Cannot access %s: %s", f, e)
                 except Exception as e:
                     logger.error("[FileOps] Error walking directory %s: %s", item, e)
-                    self.progress.warnings.append(f"Cannot scan directory: {os.path.basename(item)}")
+                    with self.progress_lock:
+                        self.progress.warnings.append(f"Cannot scan directory: {os.path.basename(item)}")
         
         logger.info("[FileOps] Total size: %s (%d files)", format_size(total_size), file_count)
         return total_size, file_count
@@ -225,19 +235,22 @@ class FileOperations:
                     src_stat = os.stat(src)
                 except Exception as e:
                     logger.warning("[FileOps] Cannot stat source file: %s", e)
-                    self.progress.warnings.append(f"Cannot read source permissions: {os.path.basename(src)}")
+                    with self.progress_lock:
+                        self.progress.warnings.append(f"Cannot read source permissions: {os.path.basename(src)}")
             
             # Check if destination exists
             if os.path.exists(dst):
                 logger.warning("[FileOps] Destination exists: %s", dst)
-                self.progress.warnings.append(f"Overwriting: {os.path.basename(dst)}")
+                with self.progress_lock:
+                    self.progress.warnings.append(f"Overwriting: {os.path.basename(dst)}")
             
             # Get file size
             file_size = os.path.getsize(src)
-            self.progress.current_file = ensure_unicode(os.path.basename(src))
-            self.progress.current_total = file_size
-            self.progress.current_bytes = 0
-            self.progress.current_percent = 0
+            with self.progress_lock:
+                self.progress.current_file = ensure_unicode(os.path.basename(src))
+                self.progress.current_total = file_size
+                self.progress.current_bytes = 0
+                self.progress.current_percent = 0
             
             logger.debug("[FileOps] File size: %s", format_size(file_size))
             
@@ -254,7 +267,8 @@ class FileOperations:
                     logger.debug("[FileOps] Created directory: %s", dst_dir)
                 except Exception as e:
                     logger.error("[FileOps] Cannot create directory %s: %s", dst_dir, e)
-                    self.progress.errors.append(f"Cannot create directory: {dst_dir}")
+                    with self.progress_lock:
+                        self.progress.errors.append(f"Cannot create directory: {dst_dir}")
                     return False
             
             # Copy with progress tracking
@@ -276,32 +290,35 @@ class FileOperations:
                             # Write chunk
                             fdst.write(chunk)
                             bytes_copied = len(chunk)
-                            self.progress.current_bytes += bytes_copied
-                            self.progress.overall_bytes += bytes_copied
+                            
+                            with self.progress_lock:
+                                self.progress.current_bytes += bytes_copied
+                                self.progress.overall_bytes += bytes_copied
                             
                             # Update progress periodically
                             now = time.time()
                             if now - last_update >= 0.1:  # Update every 100ms
-                                # Calculate speed
-                                elapsed = now - start_time
-                                if elapsed > 0:
-                                    self.progress.speed = self.progress.current_bytes / elapsed
-                                
-                                # Calculate ETA
-                                if self.progress.speed > 0:
-                                    remaining = file_size - self.progress.current_bytes
-                                    self.progress.eta = remaining / self.progress.speed
-                                
-                                # Calculate percentages
-                                if file_size > 0:
-                                    self.progress.current_percent = int(
-                                        (self.progress.current_bytes * 100) / file_size
-                                    )
-                                
-                                if self.progress.overall_total > 0:
-                                    self.progress.overall_percent = int(
-                                        (self.progress.overall_bytes * 100) / self.progress.overall_total
-                                    )
+                                with self.progress_lock:
+                                    # Calculate speed
+                                    elapsed = now - start_time
+                                    if elapsed > 0:
+                                        self.progress.speed = self.progress.current_bytes / elapsed
+                                    
+                                    # Calculate ETA
+                                    if self.progress.speed > 0:
+                                        remaining = file_size - self.progress.current_bytes
+                                        self.progress.eta = remaining / self.progress.speed
+                                    
+                                    # Calculate percentages
+                                    if file_size > 0:
+                                        self.progress.current_percent = int(
+                                            (self.progress.current_bytes * 100) / file_size
+                                        )
+                                    
+                                    if self.progress.overall_total > 0:
+                                        self.progress.overall_percent = int(
+                                            (self.progress.overall_bytes * 100) / self.progress.overall_total
+                                        )
                                 
                                 self.report_progress()
                                 last_update = now
@@ -329,10 +346,12 @@ class FileOperations:
                                     logger.warning("[FileOps] Cannot preserve ownership: %s", e)
                         except Exception as e:
                             logger.warning("[FileOps] Cannot preserve permissions: %s", e)
-                            self.progress.warnings.append(f"Cannot preserve permissions: {os.path.basename(src)}")
+                            with self.progress_lock:
+                                self.progress.warnings.append(f"Cannot preserve permissions: {os.path.basename(src)}")
                 except Exception as e:
                     logger.warning("[FileOps] Cannot copy metadata: %s", e)
-                    self.progress.warnings.append(f"Cannot copy metadata: {os.path.basename(src)}")
+                    with self.progress_lock:
+                        self.progress.warnings.append(f"Cannot copy metadata: {os.path.basename(src)}")
                 
                 # Verify if requested
                 if verify:
@@ -340,7 +359,8 @@ class FileOperations:
                     if not self.verify_file(src, dst):
                         error_msg = f"Verification failed: {os.path.basename(src)}"
                         logger.error("[FileOps] %s", error_msg)
-                        self.progress.errors.append(error_msg)
+                        with self.progress_lock:
+                            self.progress.errors.append(error_msg)
                         
                         # Remove failed copy
                         try:
@@ -356,21 +376,24 @@ class FileOperations:
                 logger.info("[FileOps] Successfully copied: %s", os.path.basename(src))
                 return True
                 
-            except IOError as e:
+            except (IOError, OSError, PermissionError) as e:
                 error_msg = f"I/O error copying {os.path.basename(src)}: {str(e)}"
                 logger.error("[FileOps] %s", error_msg)
-                self.progress.errors.append(error_msg)
+                with self.progress_lock:
+                    self.progress.errors.append(error_msg)
                 return False
             except Exception as e:
                 error_msg = f"Error copying {os.path.basename(src)}: {str(e)}"
                 logger.error("[FileOps] %s", error_msg)
-                self.progress.errors.append(error_msg)
+                with self.progress_lock:
+                    self.progress.errors.append(error_msg)
                 return False
                 
         except Exception as e:
             error_msg = f"Failed to copy {os.path.basename(src)}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def copy(self, items, dest_dir, verify=None, preserve_permissions=None):
@@ -399,13 +422,16 @@ class FileOperations:
         logger.info("[FileOps] Options: verify=%s, preserve_perms=%s", verify, preserve_permissions)
         
         # Reset progress
-        self.progress.reset()
+        with self.progress_lock:
+            self.progress.reset()
         self.cancel_flag.clear()
         self.pause_flag.clear()
         
         # Calculate total size
-        self.progress.overall_total, self.progress.files_total = \
-            self.calculate_total_size(items)
+        total_size, total_files = self.calculate_total_size(items)
+        with self.progress_lock:
+            self.progress.overall_total = total_size
+            self.progress.files_total = total_files
         
         if self.is_cancelled():
             logger.info("[FileOps] Operation cancelled before starting")
@@ -419,7 +445,8 @@ class FileOperations:
             except Exception as e:
                 error_msg = f"Cannot create destination directory: {dest_dir}"
                 logger.error("[FileOps] %s: %s", error_msg, e)
-                self.progress.errors.append(error_msg)
+                with self.progress_lock:
+                    self.progress.errors.append(error_msg)
                 return False
         
         # Copy each item
@@ -442,7 +469,8 @@ class FileOperations:
                     success = False
                     if self.is_cancelled():
                         break
-                self.progress.files_done += 1
+                with self.progress_lock:
+                    self.progress.files_done += 1
                 
             elif os.path.isdir(item):
                 # Copy directory recursively
@@ -453,19 +481,22 @@ class FileOperations:
         
         # Final progress update
         if not self.is_cancelled():
-            self.progress.overall_percent = 100
-            self.progress.current_percent = 100
+            with self.progress_lock:
+                self.progress.overall_percent = 100
+                self.progress.current_percent = 100
             self.report_progress()
         
         # Log completion
         if success and not self.is_cancelled():
             logger.info("[FileOps] Copy operation completed successfully")
-            logger.info("[FileOps] Files copied: %d/%d", self.progress.files_done, self.progress.files_total)
+            logger.info("[FileOps] Files copied: %d/%d", 
+                       self.progress.files_done, self.progress.files_total)
         else:
             if self.is_cancelled():
                 logger.info("[FileOps] Copy operation cancelled by user")
             else:
-                logger.error("[FileOps] Copy operation failed with %d errors", len(self.progress.errors))
+                logger.error("[FileOps] Copy operation failed with %d errors", 
+                           len(self.progress.errors))
         
         return success and not self.is_cancelled()
     
@@ -509,7 +540,8 @@ class FileOperations:
                 except Exception as e:
                     error_msg = f"Cannot create directory {dst_dir}: {str(e)}"
                     logger.error("[FileOps] %s", error_msg)
-                    self.progress.errors.append(error_msg)
+                    with self.progress_lock:
+                        self.progress.errors.append(error_msg)
                     return False
             
             # Apply directory permissions if preserving
@@ -521,7 +553,8 @@ class FileOperations:
                     logger.debug("[FileOps] Directory permissions preserved")
                 except Exception as e:
                     logger.warning("[FileOps] Cannot set directory permissions: %s", e)
-                    self.progress.warnings.append(f"Cannot set permissions for {os.path.basename(dst_dir)}")
+                    with self.progress_lock:
+                        self.progress.warnings.append(f"Cannot set permissions for {os.path.basename(dst_dir)}")
             
             # Copy contents
             for item in safe_listdir(src_dir):
@@ -534,7 +567,8 @@ class FileOperations:
                 if os.path.isfile(src_path):
                     if not self.copy_file(src_path, dst_path, verify, preserve_permissions):
                         return False
-                    self.progress.files_done += 1
+                    with self.progress_lock:
+                        self.progress.files_done += 1
                     
                 elif os.path.isdir(src_path):
                     if not self.copy_directory(src_path, dst_path, verify, preserve_permissions):
@@ -545,7 +579,8 @@ class FileOperations:
         except Exception as e:
             error_msg = f"Error copying directory {src_dir}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def move(self, items, dest_dir, preserve_permissions=None):
@@ -631,10 +666,13 @@ class FileOperations:
         logger.info("[FileOps] Use trash: %s", use_trash)
         
         # Reset progress for delete operation
-        self.progress.reset()
+        with self.progress_lock:
+            self.progress.reset()
         self.cancel_flag.clear()
         self.pause_flag.clear()
-        self.progress.files_total = len(items)
+        
+        with self.progress_lock:
+            self.progress.files_total = len(items)
         
         # Setup trash if needed
         trash_dir = None
@@ -642,7 +680,7 @@ class FileOperations:
             trash_dir = "/tmp/.wg_trash"
             if not os.path.exists(trash_dir):
                 try:
-                    os.makedirs(trash_dir, exist_ok=True)
+                    os.makedirs(trash_dir, mode=0o755, exist_ok=True)
                     logger.info("[FileOps] Created trash directory: %s", trash_dir)
                 except Exception as e:
                     logger.error("[FileOps] Cannot create trash directory: %s", e)
@@ -656,9 +694,10 @@ class FileOperations:
                 break
             
             item = ensure_str(item)
-            self.progress.current_file = ensure_unicode(os.path.basename(item))
-            self.progress.files_done = i + 1
-            self.progress.overall_percent = int((i + 1) * 100 / len(items))
+            with self.progress_lock:
+                self.progress.current_file = ensure_unicode(os.path.basename(item))
+                self.progress.files_done = i + 1
+                self.progress.overall_percent = int((i + 1) * 100 / len(items))
             self.report_progress()
             
             logger.debug("[FileOps] Deleting: %s", item)
@@ -681,22 +720,24 @@ class FileOperations:
                     
                 else:
                     # Permanent delete
-                    if os.path.isfile(item):
+                    if os.path.isfile(item) or os.path.islink(item):
                         os.remove(item)
                         logger.info("[FileOps] Deleted file: %s", os.path.basename(item))
                     elif os.path.isdir(item):
-                        shutil.rmtree(item)
+                        shutil.rmtree(item, ignore_errors=True)
                         logger.info("[FileOps] Deleted directory: %s", os.path.basename(item))
                         
             except Exception as e:
                 error_msg = f"Cannot delete {os.path.basename(item)}: {str(e)}"
                 logger.error("[FileOps] %s", error_msg)
-                self.progress.errors.append(error_msg)
+                with self.progress_lock:
+                    self.progress.errors.append(error_msg)
                 success = False
         
         # Final progress update
         if not self.is_cancelled():
-            self.progress.overall_percent = 100
+            with self.progress_lock:
+                self.progress.overall_percent = 100
             self.report_progress()
         
         if success and not self.is_cancelled():
@@ -705,7 +746,8 @@ class FileOperations:
             if self.is_cancelled():
                 logger.info("[FileOps] Delete operation cancelled by user")
             else:
-                logger.error("[FileOps] Delete operation failed with %d errors", len(self.progress.errors))
+                logger.error("[FileOps] Delete operation failed with %d errors", 
+                           len(self.progress.errors))
         
         return success and not self.is_cancelled()
     
@@ -732,7 +774,8 @@ class FileOperations:
             if os.path.exists(new_path):
                 error_msg = f"Cannot rename: {os.path.basename(new_path)} already exists"
                 logger.error("[FileOps] %s", error_msg)
-                self.progress.errors.append(error_msg)
+                with self.progress_lock:
+                    self.progress.errors.append(error_msg)
                 return False
             
             os.rename(old_path, new_path)
@@ -742,7 +785,8 @@ class FileOperations:
         except Exception as e:
             error_msg = f"Cannot rename {os.path.basename(old_path)}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def create_directory(self, path, permissions=0o755):
@@ -766,7 +810,8 @@ class FileOperations:
         except Exception as e:
             error_msg = f"Cannot create directory {path}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def create_file(self, path, content="", permissions=0o644):
@@ -804,7 +849,8 @@ class FileOperations:
         except Exception as e:
             error_msg = f"Cannot create file {path}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def verify_file(self, file1, file2):
@@ -826,7 +872,7 @@ class FileOperations:
             
             match = hash1 == hash2
             logger.debug("[FileOps] Verification %s: %s == %s", 
-                       "PASSED" if match else "FAILED", hash1, hash2)
+                       "PASSED" if match else "FAILED", hash1[:8], hash2[:8])
             
             return match
         except Exception as e:
@@ -974,7 +1020,8 @@ class FileOperations:
         except Exception as e:
             error_msg = f"Cannot set permissions for {os.path.basename(path)}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def get_ownership(self, path):
@@ -1036,7 +1083,8 @@ class FileOperations:
                     except KeyError:
                         error_msg = f"User not found: {user}"
                         logger.error("[FileOps] %s", error_msg)
-                        self.progress.errors.append(error_msg)
+                        with self.progress_lock:
+                            self.progress.errors.append(error_msg)
                         return False
             
             if group is not None:
@@ -1048,14 +1096,16 @@ class FileOperations:
                     except KeyError:
                         error_msg = f"Group not found: {group}"
                         logger.error("[FileOps] %s", error_msg)
-                        self.progress.errors.append(error_msg)
+                        with self.progress_lock:
+                            self.progress.errors.append(error_msg)
                         return False
             
             # Check if we have root privileges
             if os.geteuid() != 0:
                 error_msg = "Root privileges required to change ownership"
                 logger.error("[FileOps] %s", error_msg)
-                self.progress.errors.append(error_msg)
+                with self.progress_lock:
+                    self.progress.errors.append(error_msg)
                 return False
             
             os.chown(path, uid, gid)
@@ -1065,7 +1115,8 @@ class FileOperations:
         except Exception as e:
             error_msg = f"Cannot set ownership for {os.path.basename(path)}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def copy_permissions(self, src, dst):
@@ -1100,7 +1151,8 @@ class FileOperations:
         except Exception as e:
             error_msg = f"Cannot copy permissions from {os.path.basename(src)}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def change_file_mode(self, path, add_bits=None, remove_bits=None):
@@ -1136,7 +1188,8 @@ class FileOperations:
         except Exception as e:
             error_msg = f"Cannot change file mode for {os.path.basename(path)}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def make_executable(self, path):
@@ -1182,16 +1235,19 @@ class FileOperations:
     
     def get_errors(self):
         """Get list of errors"""
-        return self.progress.errors
+        with self.progress_lock:
+            return self.progress.errors.copy()
     
     def get_warnings(self):
         """Get list of warnings"""
-        return self.progress.warnings
+        with self.progress_lock:
+            return self.progress.warnings.copy()
     
     def clear_errors(self):
         """Clear all errors and warnings"""
-        self.progress.errors = []
-        self.progress.warnings = []
+        with self.progress_lock:
+            self.progress.errors = []
+            self.progress.warnings = []
     
     def get_file_info(self, path):
         """
@@ -1253,12 +1309,16 @@ class FileOperations:
         
         try:
             for root, dirs, files in os.walk(path):
+                # Filter out directories we can't access
+                dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK | os.X_OK)]
+                
                 for f in files:
                     try:
                         filepath = safe_join(root, f)
-                        total_size += os.path.getsize(filepath)
-                        file_count += 1
-                    except:
+                        if os.path.exists(filepath) and not os.path.islink(filepath):
+                            total_size += os.path.getsize(filepath)
+                            file_count += 1
+                    except (OSError, PermissionError):
                         pass
         
         except Exception as e:
@@ -1358,7 +1418,8 @@ class FileOperations:
         except Exception as e:
             error_msg = f"Cannot create symlink {link_path}: {str(e)}"
             logger.error("[FileOps] %s", error_msg)
-            self.progress.errors.append(error_msg)
+            with self.progress_lock:
+                self.progress.errors.append(error_msg)
             return False
     
     def get_symlink_target(self, link_path):

@@ -5,12 +5,28 @@ Handles all settings, preferences, and persistent storage
 
 from __future__ import absolute_import, print_function
 import os
-# OR
-from Plugins.Extensions.WGFileManagerPro.core.compatibility import ensure_str, ensure_unicode, ConfigParser
+import sys
 
+# Define logger placeholder - will be initialized after config
+_logger = None
+
+def _get_logger():
+    """Lazy import of logger to avoid circular imports"""
+    global _logger
+    if _logger is None:
+        try:
+            from Plugins.Extensions.WGFileManagerPro.utils.logger import get_logger
+            _logger = get_logger(__name__)
+        except ImportError:
+            # Fallback logger
+            import logging
+            _logger = logging.getLogger('wgfilemanager.config')
+    return _logger
+
+# Try to import Enigma2 config system
 try:
     from Components.config import config, ConfigSubsection, ConfigSelection, \
-        ConfigYesNo, ConfigText, ConfigInteger, ConfigNumber, configfile
+        ConfigYesNo, ConfigText, ConfigInteger, configfile
     ENIGMA2_AVAILABLE = True
 except ImportError:
     ENIGMA2_AVAILABLE = False
@@ -18,6 +34,9 @@ except ImportError:
     class DummyConfig:
         pass
     config = DummyConfig()
+
+# Import compatibility layer
+from Plugins.Extensions.WGFileManagerPro.core.compatibility import ensure_str, ensure_unicode, ConfigParser
 
 
 class WGFileManagerConfig:
@@ -185,8 +204,9 @@ class WGFileManagerConfig:
         if not hasattr(cfg, 'cache_size'):
             cfg.cache_size = ConfigInteger(default=10, limits=(1, 100))  # MB
         
-        logger = get_logger()
-        logger.info("[Config] Configuration initialized")
+        logger = _get_logger()
+        if logger:
+            logger.info("[Config] Configuration initialized")
         
     def get(self, key, default=None):
         """
@@ -217,7 +237,7 @@ class WGFileManagerConfig:
         """Get value from config file"""
         try:
             if os.path.exists(self.config_file):
-                parser = ConfigParser.ConfigParser()
+                parser = self._get_config_parser()
                 parser.read(self.config_file)
                 
                 if '.' in key:
@@ -238,10 +258,21 @@ class WGFileManagerConfig:
                         return int(value)
                     else:
                         return ensure_unicode(value)
-        except:
-            pass
+        except Exception as e:
+            logger = _get_logger()
+            if logger:
+                logger.debug("[Config] Error reading from file: %s", e)
         
         return default
+    
+    def _get_config_parser(self):
+        """Get appropriate ConfigParser instance for Python 2/3"""
+        if hasattr(ConfigParser, 'ConfigParser'):
+            # Python 2
+            return ConfigParser.ConfigParser()
+        else:
+            # Python 3
+            return ConfigParser()
     
     def set(self, key, value):
         """
@@ -274,7 +305,7 @@ class WGFileManagerConfig:
     def _save_to_file(self, key, value):
         """Save value to config file"""
         try:
-            parser = ConfigParser.ConfigParser()
+            parser = self._get_config_parser()
             if os.path.exists(self.config_file):
                 parser.read(self.config_file)
             
@@ -295,19 +326,29 @@ class WGFileManagerConfig:
             
             parser.set(section, option, str_value)
             
+            # Ensure directory exists
+            config_dir = os.path.dirname(self.config_file)
+            if config_dir and not os.path.exists(config_dir):
+                try:
+                    os.makedirs(config_dir)
+                except:
+                    pass
+            
             with open(self.config_file, 'w') as f:
                 parser.write(f)
         except Exception as e:
-            logger = get_logger()
-            logger.error("[Config] Error saving to file: %s", e)
+            logger = _get_logger()
+            if logger:
+                logger.error("[Config] Error saving to file: %s", e)
     
     def save(self):
         """Save all configuration to disk"""
         if ENIGMA2_AVAILABLE:
             configfile.save()
         
-        logger = get_logger()
-        logger.debug("[Config] Configuration saved")
+        logger = _get_logger()
+        if logger:
+            logger.debug("[Config] Configuration saved")
     
     def reset_to_defaults(self, section=None):
         """
@@ -316,24 +357,69 @@ class WGFileManagerConfig:
         Args:
             section: Specific section to reset (None for all)
         """
-        logger = get_logger()
-        logger.info("[Config] Resetting configuration to defaults")
+        logger = _get_logger()
+        if logger:
+            logger.info("[Config] Resetting configuration to defaults")
         
         if section == 'paths' or section is None:
             self.set('left_path', self.get('default_left_path', '/media/hdd'))
             self.set('right_path', self.get('default_right_path', '/tmp'))
+            self.set('save_left_on_exit', 'yes')
+            self.set('save_right_on_exit', 'yes')
+        
+        if section == 'navigation' or section is None:
+            self.set('enable_wraparound', True)
+            self.set('scroll_speed', 'normal')
+            self.set('items_per_page', 20)
+            self.set('confirm_exit', True)
+            self.set('exit_behavior', 'parent')
         
         if section == 'view' or section is None:
             self.set('show_hidden_files', False)
             self.set('show_file_size', True)
+            self.set('show_file_date', False)
             self.set('show_icons', True)
             self.set('show_permissions', False)
             self.set('sort_dirs_first', True)
+            self.set('sort_case_sensitive', False)
+            self.set('view_mode', 'list')
+            self.set('font_size', 'auto')
+        
+        if section == 'theme' or section is None:
+            self.set('theme', 'dark')
+            self.set('icon_set', 'modern')
+            self.set('highlight_color', 'blue')
         
         if section == 'operations' or section is None:
             self.set('confirm_delete', True)
+            self.set('confirm_overwrite', True)
             self.set('use_trash', True)
+            self.set('verify_copy', False)
+            self.set('buffer_size', 64)
             self.set('preserve_permissions', True)
+            self.set('default_file_perms', '644')
+            self.set('default_dir_perms', '755')
+        
+        if section == 'network' or section is None:
+            self.set('ftp_timeout', 30)
+            self.set('network_buffer', 32)
+            self.set('enable_ftp', False)
+            self.set('enable_smb', False)
+        
+        if section == 'media' or section is None:
+            self.set('auto_thumbnails', True)
+            self.set('thumbnail_size', 'medium')
+            self.set('show_metadata', True)
+            self.set('auto_play_media', True)
+            self.set('media_player', 'enigma2')
+        
+        if section == 'advanced' or section is None:
+            self.set('debug_mode', False)
+            self.set('log_operations', True)
+            self.set('max_history', 50)
+            self.set('max_log_size', 1024)
+            self.set('enable_animations', True)
+            self.set('cache_size', 10)
         
         self.save()
     
@@ -347,7 +433,7 @@ class WGFileManagerConfig:
         bookmarks = []
         try:
             if os.path.exists(self.config_file):
-                parser = ConfigParser.ConfigParser()
+                parser = self._get_config_parser()
                 parser.read(self.config_file)
                 if parser.has_section('bookmarks'):
                     for key, value in parser.items('bookmarks'):
@@ -369,7 +455,7 @@ class WGFileManagerConfig:
             name: Optional bookmark name
         """
         try:
-            parser = ConfigParser.ConfigParser()
+            parser = self._get_config_parser()
             if os.path.exists(self.config_file):
                 parser.read(self.config_file)
             
@@ -386,15 +472,22 @@ class WGFileManagerConfig:
             
             parser.set('bookmarks', 'bookmark_%d' % i, ensure_str(path))
             
+            # Ensure directory exists
+            config_dir = os.path.dirname(self.config_file)
+            if config_dir and not os.path.exists(config_dir):
+                os.makedirs(config_dir)
+            
             with open(self.config_file, 'w') as f:
                 parser.write(f)
             
-            logger = get_logger()
-            logger.info("[Config] Bookmark saved: %s -> %s", name, path)
+            logger = _get_logger()
+            if logger:
+                logger.info("[Config] Bookmark saved: %s -> %s", name, path)
             
         except Exception as e:
-            logger = get_logger()
-            logger.error("[Config] Error saving bookmark: %s", e)
+            logger = _get_logger()
+            if logger:
+                logger.error("[Config] Error saving bookmark: %s", e)
     
     def remove_bookmark(self, path):
         """
@@ -404,7 +497,7 @@ class WGFileManagerConfig:
             path: Path to remove
         """
         try:
-            parser = ConfigParser.ConfigParser()
+            parser = self._get_config_parser()
             if os.path.exists(self.config_file):
                 parser.read(self.config_file)
             
@@ -416,12 +509,14 @@ class WGFileManagerConfig:
                 with open(self.config_file, 'w') as f:
                     parser.write(f)
             
-            logger = get_logger()
-            logger.info("[Config] Bookmark removed: %s", path)
+            logger = _get_logger()
+            if logger:
+                logger.info("[Config] Bookmark removed: %s", path)
             
         except Exception as e:
-            logger = get_logger()
-            logger.error("[Config] Error removing bookmark: %s", e)
+            logger = _get_logger()
+            if logger:
+                logger.error("[Config] Error removing bookmark: %s", e)
     
     def get_recent_paths(self):
         """
@@ -433,7 +528,7 @@ class WGFileManagerConfig:
         recent = []
         try:
             if os.path.exists(self.config_file):
-                parser = ConfigParser.ConfigParser()
+                parser = self._get_config_parser()
                 parser.read(self.config_file)
                 if parser.has_section('recent'):
                     items = [(key, value) for key, value in parser.items('recent')]
@@ -451,7 +546,7 @@ class WGFileManagerConfig:
             path: Path to add
         """
         try:
-            parser = ConfigParser.ConfigParser()
+            parser = self._get_config_parser()
             if os.path.exists(self.config_file):
                 parser.read(self.config_file)
             
@@ -473,12 +568,14 @@ class WGFileManagerConfig:
             with open(self.config_file, 'w') as f:
                 parser.write(f)
             
-            logger = get_logger()
-            logger.debug("[Config] Recent path added: %s", path)
+            logger = _get_logger()
+            if logger:
+                logger.debug("[Config] Recent path added: %s", path)
             
         except Exception as e:
-            logger = get_logger()
-            logger.error("[Config] Error adding recent path: %s", e)
+            logger = _get_logger()
+            if logger:
+                logger.error("[Config] Error adding recent path: %s", e)
     
     def get_all_settings(self):
         """
@@ -521,13 +618,15 @@ class WGFileManagerConfig:
             with open(filepath, 'w') as f:
                 json.dump(settings, f, indent=2)
             
-            logger = get_logger()
-            logger.info("[Config] Settings exported to: %s", filepath)
+            logger = _get_logger()
+            if logger:
+                logger.info("[Config] Settings exported to: %s", filepath)
             return True
             
         except Exception as e:
-            logger = get_logger()
-            logger.error("[Config] Error exporting settings: %s", e)
+            logger = _get_logger()
+            if logger:
+                logger.error("[Config] Error exporting settings: %s", e)
             return False
     
     def import_settings(self, filepath):
@@ -551,13 +650,15 @@ class WGFileManagerConfig:
             
             self.save()
             
-            logger = get_logger()
-            logger.info("[Config] Settings imported from: %s", filepath)
+            logger = _get_logger()
+            if logger:
+                logger.info("[Config] Settings imported from: %s", filepath)
             return True
             
         except Exception as e:
-            logger = get_logger()
-            logger.error("[Config] Error importing settings: %s", e)
+            logger = _get_logger()
+            if logger:
+                logger.error("[Config] Error importing settings: %s", e)
             return False
 
 
