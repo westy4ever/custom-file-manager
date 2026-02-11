@@ -5,6 +5,7 @@ Permission dialog for changing file permissions
 from __future__ import absolute_import, print_function
 import os
 import stat
+import threading
 
 try:
     from Screens.Screen import Screen
@@ -12,7 +13,6 @@ try:
     from Components.Label import Label
     from Components.ActionMap import ActionMap
     from Components.CheckBox import CheckBox
-    from enigma import eTimer
     ENIGMA2_AVAILABLE = True
 except ImportError:
     ENIGMA2_AVAILABLE = False
@@ -32,7 +32,7 @@ if ENIGMA2_AVAILABLE:
         
         # Skin definition
         skin = """
-            <screen position="center,center" size="700,500" title="Change Permissions">
+            <screen position="center,center" size="700,550" title="Change Permissions">
                 <widget name="title" position="20,20" size="660,40" font="Regular;26" />
                 <widget name="file_info" position="20,70" size="660,30" font="Regular;20" />
                 <widget name="current_perms" position="20,110" size="660,30" font="Regular;18" />
@@ -61,10 +61,10 @@ if ENIGMA2_AVAILABLE:
                 
                 <!-- Quick presets -->
                 <widget name="label_presets" position="50,400" size="600,25" font="Regular;20" />
-                <widget name="preset_755" position="50,430" size="120,35" font="Regular;18" />
-                <widget name="preset_644" position="190,430" size="120,35" font="Regular;18" />
-                <widget name="preset_777" position="330,430" size="120,35" font="Regular;18" />
-                <widget name="preset_600" position="470,430" size="120,35" font="Regular;18" />
+                <widget name="preset_755" position="50,430" size="120,35" font="Regular;18" backgroundColor="#336633" />
+                <widget name="preset_644" position="190,430" size="120,35" font="Regular;18" backgroundColor="#336633" />
+                <widget name="preset_777" position="330,430" size="120,35" font="Regular;18" backgroundColor="#336633" />
+                <widget name="preset_600" position="470,430" size="120,35" font="Regular;18" backgroundColor="#336633" />
                 
                 <!-- Apply options -->
                 <widget name="recursive" position="50,480" size="300,30" font="Regular;18" />
@@ -84,6 +84,7 @@ if ENIGMA2_AVAILABLE:
                 recursive: Apply recursively to directories
             """
             Screen.__init__(self, session)
+            self.session = session
             
             self.filepath = filepath
             self.recursive = recursive
@@ -109,23 +110,43 @@ if ENIGMA2_AVAILABLE:
             self["label_others"] = Label("Others")
             
             # Permission checkboxes
-            self["owner_read"] = CheckBox("Read", self.current_mode & stat.S_IRUSR)
-            self["owner_write"] = CheckBox("Write", self.current_mode & stat.S_IWUSR)
-            self["owner_execute"] = CheckBox("Execute", self.current_mode & stat.S_IXUSR)
+            self["owner_read"] = CheckBox()
+            self["owner_read"].setValue(bool(self.current_mode & stat.S_IRUSR))
             
-            self["group_read"] = CheckBox("Read", self.current_mode & stat.S_IRGRP)
-            self["group_write"] = CheckBox("Write", self.current_mode & stat.S_IWGRP)
-            self["group_execute"] = CheckBox("Execute", self.current_mode & stat.S_IXGRP)
+            self["owner_write"] = CheckBox()
+            self["owner_write"].setValue(bool(self.current_mode & stat.S_IWUSR))
             
-            self["others_read"] = CheckBox("Read", self.current_mode & stat.S_IROTH)
-            self["others_write"] = CheckBox("Write", self.current_mode & stat.S_IWOTH)
-            self["others_execute"] = CheckBox("Execute", self.current_mode & stat.S_IXOTH)
+            self["owner_execute"] = CheckBox()
+            self["owner_execute"].setValue(bool(self.current_mode & stat.S_IXUSR))
+            
+            self["group_read"] = CheckBox()
+            self["group_read"].setValue(bool(self.current_mode & stat.S_IRGRP))
+            
+            self["group_write"] = CheckBox()
+            self["group_write"].setValue(bool(self.current_mode & stat.S_IWGRP))
+            
+            self["group_execute"] = CheckBox()
+            self["group_execute"].setValue(bool(self.current_mode & stat.S_IXGRP))
+            
+            self["others_read"] = CheckBox()
+            self["others_read"].setValue(bool(self.current_mode & stat.S_IROTH))
+            
+            self["others_write"] = CheckBox()
+            self["others_write"].setValue(bool(self.current_mode & stat.S_IWOTH))
+            
+            self["others_execute"] = CheckBox()
+            self["others_execute"].setValue(bool(self.current_mode & stat.S_IXOTH))
             
             # Special bits
             self["label_special"] = Label("Special Bits:")
-            self["setuid"] = CheckBox("SetUID", self.current_mode & stat.S_ISUID)
-            self["setgid"] = CheckBox("SetGID", self.current_mode & stat.S_ISGID)
-            self["sticky"] = CheckBox("Sticky", self.current_mode & stat.S_ISVTX)
+            self["setuid"] = CheckBox()
+            self["setuid"].setValue(bool(self.current_mode & stat.S_ISUID))
+            
+            self["setgid"] = CheckBox()
+            self["setgid"].setValue(bool(self.current_mode & stat.S_ISGID))
+            
+            self["sticky"] = CheckBox()
+            self["sticky"].setValue(bool(self.current_mode & stat.S_ISVTX))
             
             # Quick presets
             self["label_presets"] = Label("Quick Presets:")
@@ -135,14 +156,15 @@ if ENIGMA2_AVAILABLE:
             self["preset_600"] = Label("600 (rw-------)")
             
             # Apply options
-            self["recursive"] = CheckBox("Apply recursively to directories", recursive)
+            self["recursive"] = CheckBox()
+            self["recursive"].setValue(recursive)
             
             # Buttons
-            self["buttons"] = Label("[OK] Apply  [Cancel]")
+            self["buttons"] = Label("[OK] Apply  [CANCEL]  [GREEN] Apply  [RED] Cancel  [1-4] Presets")
             
             # Setup actions
             self["actions"] = ActionMap(
-                ["WGFileManagerActions", "ColorActions"],
+                ["WGFileManagerActions", "ColorActions", "NumberActions"],
                 {
                     "ok": self.apply_permissions,
                     "cancel": self.close,
@@ -176,6 +198,7 @@ if ENIGMA2_AVAILABLE:
                 self["current_perms"].setText(f"Current: {perm_str}  Owner: {owner_info}")
             except Exception as e:
                 logger.error("[PermissionDialog] Update display error: %s", e)
+                self["current_perms"].setText("Current: Unable to read permissions")
         
         def calculate_mode(self):
             """Calculate mode from checkboxes"""
@@ -232,26 +255,33 @@ if ENIGMA2_AVAILABLE:
                     self.apply_recursive(new_mode)
                 
                 self.update_display()
-                self.session.open(MessageBox, "Permissions applied successfully!", 
+                self.session.open(MessageBox, _("Permissions applied successfully!"), 
                                 MessageBox.TYPE_INFO, timeout=2)
             else:
                 errors = self.file_ops.get_errors()
-                error_msg = "\n".join(errors) if errors else "Unknown error"
-                self.session.open(MessageBox, f"Failed to apply permissions:\n{error_msg}", 
+                error_msg = "\n".join(errors) if errors else _("Unknown error")
+                self.session.open(MessageBox, _("Failed to apply permissions:\n%s") % error_msg, 
                                 MessageBox.TYPE_ERROR)
         
         def apply_recursive(self, mode):
             """Apply permissions recursively to directory contents"""
-            import threading
-            
             def recursive_worker():
-                for root, dirs, files in os.walk(self.filepath):
-                    for name in dirs + files:
-                        path = os.path.join(root, name)
-                        try:
-                            os.chmod(path, mode)
-                        except:
-                            pass
+                try:
+                    for root, dirs, files in os.walk(self.filepath):
+                        # Update dirs in place to skip inaccessible directories
+                        dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK | os.X_OK)]
+                        
+                        for name in dirs + files:
+                            if self.file_ops.is_cancelled():
+                                break
+                            path = os.path.join(root, name)
+                            try:
+                                os.chmod(path, mode)
+                                logger.debug("[PermissionDialog] Applied mode %o to: %s", mode, path)
+                            except (OSError, PermissionError) as e:
+                                logger.warning("[PermissionDialog] Cannot change permissions for %s: %s", path, e)
+                except Exception as e:
+                    logger.error("[PermissionDialog] Error in recursive permission application: %s", e)
             
             # Run in thread to avoid blocking UI
             thread = threading.Thread(target=recursive_worker)
@@ -287,7 +317,7 @@ if ENIGMA2_AVAILABLE:
             self.update_checkboxes_from_mode(mode)
             
             # Show confirmation
-            self.session.open(MessageBox, f"Preset '{preset_name}' loaded", 
+            self.session.open(MessageBox, _("Preset '%s' loaded") % preset_name, 
                             MessageBox.TYPE_INFO, timeout=1)
         
         def update_checkboxes_from_mode(self, mode):
@@ -323,16 +353,39 @@ else:
     class PermissionDialog:
         """Simple permission dialog for testing"""
         
-        def __init__(self, filepath, recursive=False):
+        def __init__(self, session=None, filepath="", recursive=False):
+            """
+            Initialize permission dialog for testing
+            
+            Args:
+                session: Enigma2 session (ignored in test mode)
+                filepath: File/directory path
+                recursive: Apply recursively to directories
+            """
+            self.session = session
             self.filepath = filepath
             self.recursive = recursive
+            self.file_ops = FileOperations()
+            
             print(f"\n=== Permission Editor ===")
             print(f"File: {filepath}")
             
             try:
                 import stat
                 mode = os.stat(filepath).st_mode
-                print(f"Current: {oct(mode)[-3:]} ({stat.filemode(mode)})")
+                perm_str = oct(mode)[-3:]
+                perm_rwx = ''
+                perm_rwx += 'r' if mode & stat.S_IRUSR else '-'
+                perm_rwx += 'w' if mode & stat.S_IWUSR else '-'
+                perm_rwx += 'x' if mode & stat.S_IXUSR else '-'
+                perm_rwx += 'r' if mode & stat.S_IRGRP else '-'
+                perm_rwx += 'w' if mode & stat.S_IWGRP else '-'
+                perm_rwx += 'x' if mode & stat.S_IXGRP else '-'
+                perm_rwx += 'r' if mode & stat.S_IROTH else '-'
+                perm_rwx += 'w' if mode & stat.S_IWOTH else '-'
+                perm_rwx += 'x' if mode & stat.S_IXOTH else '-'
+                
+                print(f"Current: {perm_str} ({perm_rwx})")
             except:
                 print("Current: Unable to read permissions")
         
@@ -345,5 +398,32 @@ else:
             print("5. Custom")
             print("0. Cancel")
             
-            choice = input("\nSelect: ")
-            return choice
+            try:
+                choice = input("\nSelect: ")
+                return choice
+            except:
+                return "0"
+        
+        def apply_preset_755(self):
+            """Apply 755 preset"""
+            self.file_ops.set_permissions(self.filepath, 0o755)
+            print("Applied 755 permissions")
+        
+        def apply_preset_644(self):
+            """Apply 644 preset"""
+            self.file_ops.set_permissions(self.filepath, 0o644)
+            print("Applied 644 permissions")
+        
+        def apply_preset_777(self):
+            """Apply 777 preset"""
+            self.file_ops.set_permissions(self.filepath, 0o777)
+            print("Applied 777 permissions")
+        
+        def apply_preset_600(self):
+            """Apply 600 preset"""
+            self.file_ops.set_permissions(self.filepath, 0o600)
+            print("Applied 600 permissions")
+        
+        def close(self):
+            """Close dialog"""
+            print("Permission dialog closed")
